@@ -15,3 +15,12 @@ Components: main
 Description: Debian packages for projects maintained by Alejandro Mora
 SignWith: 7802971A833983DD60CD4C1F68A66E3B0EA6F825
 Limit: 3
+
+Origin: alejandro.md
+Label: Alejandro Mora Packages
+Codename: stable
+Architectures: amd64 arm64 armhf
+Components: main
+Description: Compatibility suite for sources written before the move to packages.alejandro.md
+SignWith: 7802971A833983DD60CD4C1F68A66E3B0EA6F825
+Limit: 3
