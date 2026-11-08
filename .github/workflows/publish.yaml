@@ -1,0 +1,265 @@
+name: publish
+
+# Central publisher for packages.alejandro.md.
+#
+# Project repositories do not write to R2. They build their own artifacts,
+# attach them to their own GitHub Release, then fire a repository_dispatch
+# here. This job is the only holder of the R2 credentials and the only writer
+# of the reprepro database, which is why it is serialized by a concurrency
+# group rather than run per project.
+
+on:
+  repository_dispatch:
+    types: [publish]
+
+  workflow_dispatch:
+    inputs:
+      repo:
+        description: "Project to publish, e.g. mariner3d/mariner. Blank publishes every registered project."
+        required: false
+      tag:
+        description: "Release tag. Blank uses that project's latest release."
+        required: false
+      rebuild:
+        description: "Discard reprepro state and rebuild the repository from scratch"
+        type: boolean
+        default: false
+
+  schedule:
+    # Weekly reconciliation: re-derives the index from every project's latest
+    # release, so a dispatch that was dropped or failed self-heals.
+    - cron: "0 4 * * 0"
+
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
+env:
+  R2_PUBLIC_BUCKET: packages
+  R2_STATE_BUCKET: packages-state
+  PUBLIC_BASE_URL: https://packages.alejandro.md
+  EXPECTED_FPR: 7802971A833983DD60CD4C1F68A66E3B0EA6F825
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      RCLONE_CONFIG_R2_TYPE: s3
+      RCLONE_CONFIG_R2_PROVIDER: Cloudflare
+      RCLONE_CONFIG_R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      RCLONE_CONFIG_R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      RCLONE_CONFIG_R2_ENDPOINT: https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
+      # R2 rejects object ACLs outright, and the API token is scoped to these
+      # two buckets, so the bucket-existence probe has to be skipped.
+      RCLONE_CONFIG_R2_ACL: private
+      RCLONE_CONFIG_R2_NO_CHECK_BUCKET: "true"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify required secrets are present
+        env:
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+        run: |
+          missing=0
+          for name in R2_ACCOUNT_ID R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY GPG_PRIVATE_KEY; do
+            eval "value=\${$name}"
+            if [ -z "$value" ]; then
+              echo "::error::$name is not set"
+              missing=1
+            fi
+          done
+          [ "$missing" -eq 0 ] || exit 1
+
+      - name: Install tooling
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends reprepro rclone jq
+
+      - name: Import GPG signing key
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+        run: |
+          printf '%s' "$GPG_PRIVATE_KEY" | gpg --batch --import
+
+          FPR=$(gpg --list-secret-keys --with-colons | awk -F: '/^fpr:/ {print $10; exit}')
+          if [ -z "$FPR" ]; then
+            echo "::error::GPG import produced no usable secret key."
+            exit 1
+          fi
+          if [ "$FPR" != "$EXPECTED_FPR" ]; then
+            echo "::error::Imported key $FPR does not match the published repository key $EXPECTED_FPR. Refusing to re-sign with a different key."
+            exit 1
+          fi
+
+          echo "GPG_KEY_ID=$FPR" >> "$GITHUB_ENV"
+          gpg --armor --export "$FPR" > gpg.key
+
+      - name: Resolve what to publish
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PAYLOAD_REPO: ${{ github.event.client_payload.repo }}
+          PAYLOAD_TAG: ${{ github.event.client_payload.tag }}
+          INPUT_REPO: ${{ inputs.repo }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+
+          REQ_REPO=""
+          REQ_TAG=""
+
+          case "$EVENT_NAME" in
+            repository_dispatch)
+              REQ_REPO="$PAYLOAD_REPO"
+              REQ_TAG="$PAYLOAD_TAG"
+              if [ -z "$REQ_REPO" ]; then
+                echo "::error::client_payload.repo is required."
+                exit 1
+              fi
+              ;;
+            workflow_dispatch)
+              REQ_REPO="$INPUT_REPO"
+              REQ_TAG="$INPUT_TAG"
+              ;;
+          esac
+
+          # A dispatch can only publish for a project registered in projects/.
+          # Without this check, anyone able to fire the event could inject
+          # packages from a repository of their own.
+          if [ -n "$REQ_REPO" ]; then
+            if ! jq -e -s --arg r "$REQ_REPO" 'any(.[]; .repo == $r)' projects/*.json >/dev/null; then
+              echo "::error::$REQ_REPO is not registered in projects/. Add it there first."
+              exit 1
+            fi
+            jq -c -s --arg r "$REQ_REPO" --arg t "$REQ_TAG" \
+              '.[] | select(.repo == $r) | {repo, suites, deb_pattern, tag: $t}' \
+              projects/*.json > targets.jsonl
+          else
+            jq -c -s '.[] | {repo, suites, deb_pattern, tag: ""}' projects/*.json > targets.jsonl
+          fi
+
+          echo "publishing:"
+          cat targets.jsonl
+
+      - name: Restore reprepro state
+        env:
+          REBUILD: ${{ inputs.rebuild }}
+        run: |
+          mkdir -p db
+          if [ "$REBUILD" = "true" ]; then
+            echo "rebuild requested: starting from an empty database"
+          else
+            rclone copy "r2:${R2_STATE_BUCKET}/reprepro-db" ./db --checksum \
+              || echo "no prior state found, starting fresh"
+          fi
+          ls -la db || true
+
+      - name: Download release artifacts
+        run: |
+          set -euo pipefail
+          mkdir -p incoming
+
+          while read -r target; do
+            [ -n "$target" ] || continue
+            repo=$(jq -r '.repo' <<<"$target")
+            tag=$(jq -r '.tag' <<<"$target")
+            pattern=$(jq -r '.deb_pattern' <<<"$target")
+
+            if [ -z "$tag" ] || [ "$tag" = "null" ]; then
+              tag=$(gh release view -R "$repo" --json tagName -q .tagName)
+              echo "$repo: latest release is $tag"
+            fi
+
+            dest="incoming/$(echo "$repo" | tr '/' '_')"
+            mkdir -p "$dest"
+            gh release download "$tag" -R "$repo" -p "$pattern" -D "$dest" --clobber
+
+            echo "$repo $tag" >> downloaded.txt
+            ls -la "$dest"
+          done < targets.jsonl
+
+      - name: Build the keyring package
+        run: |
+          set -euo pipefail
+          VERSION=$(cat keyring/VERSION)
+          ./keyring/build.sh "$VERSION" gpg.key incoming/_keyring
+          echo "KEYRING_VERSION=$VERSION" >> "$GITHUB_ENV"
+
+      - name: Include packages in the repository
+        run: |
+          set -euo pipefail
+          RP="reprepro -b . --confdir conf --dbdir db --outdir deb"
+
+          while read -r target; do
+            [ -n "$target" ] || continue
+            repo=$(jq -r '.repo' <<<"$target")
+            dest="incoming/$(echo "$repo" | tr '/' '_')"
+
+            for suite in $(jq -r '.suites[]' <<<"$target"); do
+              for deb in "$dest"/*.deb; do
+                [ -e "$deb" ] || continue
+                echo "including $(basename "$deb") into $suite"
+                $RP includedeb "$suite" "$deb"
+              done
+            done
+          done < targets.jsonl
+
+          # The keyring goes into every suite. Skip suites that already carry
+          # this version, so a re-run or a reconciliation pass is not an error.
+          for suite in $(jq -r -s 'map(.suites[]) | unique | .[]' projects/*.json); do
+            if $RP list "$suite" alejandro-md-keyring | grep -q "${KEYRING_VERSION}"; then
+              echo "keyring ${KEYRING_VERSION} already in $suite"
+            else
+              $RP includedeb "$suite" incoming/_keyring/*.deb
+            fi
+          done
+
+          $RP export
+          find deb -maxdepth 3 -type d | sort
+
+      - name: Render site files
+        run: |
+          mkdir -p publish-site
+          cp site/index.html site/setup.sh gpg.key publish-site/
+          sed -i "s|@@BASE_URL@@|${PUBLIC_BASE_URL}|g" \
+            publish-site/index.html publish-site/setup.sh
+
+      - name: Upload to R2
+        run: |
+          set -euo pipefail
+
+          # Order matters. New pool files must exist before the indices that
+          # reference them, and pruning must happen only after the indices
+          # have stopped referencing the old ones. Otherwise a client that
+          # updates mid-publish gets a hash sum mismatch or a 404.
+          rclone copy deb/pool "r2:${R2_PUBLIC_BUCKET}/deb/pool" --checksum --transfers 8 -v
+          rclone sync deb/dists "r2:${R2_PUBLIC_BUCKET}/deb/dists" --checksum --transfers 8 -v
+          rclone sync deb/pool  "r2:${R2_PUBLIC_BUCKET}/deb/pool"  --checksum --transfers 8 -v
+
+          rclone copy publish-site "r2:${R2_PUBLIC_BUCKET}" --checksum -v
+
+      - name: Save reprepro state
+        run: rclone sync ./db "r2:${R2_STATE_BUCKET}/reprepro-db" --checksum -v
+
+      - name: Summary
+        run: |
+          {
+            echo "### Published to ${PUBLIC_BASE_URL}"
+            echo
+            echo "Signed with \`${GPG_KEY_ID}\`"
+            echo
+            if [ -f downloaded.txt ]; then
+              echo "| project | tag |"
+              echo "| --- | --- |"
+              while read -r repo tag; do
+                echo "| \`$repo\` | \`$tag\` |"
+              done < downloaded.txt
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

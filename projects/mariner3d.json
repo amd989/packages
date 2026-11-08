@@ -1,0 +1,7 @@
+{
+  "name": "mariner3d",
+  "repo": "mariner3d/mariner",
+  "suites": ["bookworm", "trixie"],
+  "deb_pattern": "*.deb",
+  "notes": "MSLA 3D printer web controller. Previously published to amd989.github.io/mariner and ppa.l9o.dev."
+}

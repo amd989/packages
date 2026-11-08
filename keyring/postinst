@@ -1,0 +1,52 @@
+#!/bin/sh
+set -e
+
+SOURCES=/etc/apt/sources.list.d/alejandro-md.sources
+KEYRING=/usr/share/keyrings/alejandro-md.gpg
+
+case "$1" in
+  configure)
+    CODENAME=""
+    if [ -r /etc/os-release ]; then
+      CODENAME="$(. /etc/os-release 2>/dev/null; printf '%s' "${VERSION_CODENAME:-}")"
+    fi
+    if [ -z "$CODENAME" ] && command -v lsb_release >/dev/null 2>&1; then
+      CODENAME="$(lsb_release -cs 2>/dev/null || true)"
+    fi
+
+    case "$CODENAME" in
+      bookworm|trixie)
+        SUITE="$CODENAME"
+        ;;
+      *)
+        SUITE="bookworm"
+        echo "alejandro-md-keyring: no packages are built for '${CODENAME:-unknown}';" >&2
+        echo "alejandro-md-keyring: registering the bookworm suite, which may not be installable here." >&2
+        ;;
+    esac
+
+    cat > "$SOURCES" <<EOF
+# Managed by alejandro-md-keyring. Local edits are overwritten on upgrade.
+Types: deb
+URIs: https://packages.alejandro.md/deb
+Suites: $SUITE
+Components: main
+Architectures: $(dpkg --print-architecture)
+Signed-By: $KEYRING
+EOF
+    chmod 0644 "$SOURCES"
+
+    # Retire the per-project source files from before the move to
+    # packages.alejandro.md, so apt does not report duplicate or dead sources.
+    for legacy in mariner3d mariner; do
+      old="/etc/apt/sources.list.d/${legacy}.list"
+      if [ -f "$old" ] && grep -qE 'amd989\.github\.io|ppa\.l9o\.dev' "$old" 2>/dev/null; then
+        mv "$old" "${old}.replaced-by-alejandro-md-keyring"
+        echo "alejandro-md-keyring: retired stale source $old" >&2
+      fi
+    done
+    ;;
+esac
+
+
+exit 0

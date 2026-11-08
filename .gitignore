@@ -1,0 +1,10 @@
+# reprepro state, pulled from the private state bucket at publish time
+db/
+
+# generated publish tree, never committed
+deb/
+rpm/
+incoming/
+*.deb
+*.rpm
+gpg.key

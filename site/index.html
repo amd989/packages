@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>packages.alejandro.md</title>
+<style>
+  :root {
+    --bg: #fbfbfa;
+    --fg: #1c1b1a;
+    --muted: #6b6a67;
+    --rule: #e3e1dd;
+    --code-bg: #f1efec;
+    --accent: #8a5a2b;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #17161a;
+      --fg: #e9e7e3;
+      --muted: #9b9893;
+      --rule: #2e2c31;
+      --code-bg: #201f24;
+      --accent: #d9a46a;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #17161a;
+    --fg: #e9e7e3;
+    --muted: #9b9893;
+    --rule: #2e2c31;
+    --code-bg: #201f24;
+    --accent: #d9a46a;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font: 16px/1.6 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  main { max-width: 46rem; margin: 0 auto; padding: 4rem 16px 6rem; }
+  h1 { font-size: 1.6rem; letter-spacing: -0.01em; margin: 0 0 0.25rem; }
+  h2 { font-size: 1.05rem; margin: 2.75rem 0 0.75rem; }
+  p.lede { color: var(--muted); margin: 0 0 2.5rem; }
+  pre {
+    background: var(--code-bg);
+    border: 1px solid var(--rule);
+    border-radius: 6px;
+    padding: 0.9rem 1rem;
+    overflow-x: auto;
+    font-size: 0.875rem;
+    margin: 0 0 1rem;
+  }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.925rem; }
+  th, td { text-align: left; padding: 0.55rem 0.5rem; border-bottom: 1px solid var(--rule); }
+  th { font-weight: 600; color: var(--muted); font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.04em; }
+  td code { font-size: 0.875rem; }
+  a { color: var(--accent); }
+  footer { margin-top: 4rem; padding-top: 1.5rem; border-top: 1px solid var(--rule); color: var(--muted); font-size: 0.85rem; }
+  .fpr { word-break: break-all; }
+</style>
+</head>
+<body>
+<main>
+
+  <h1>packages.alejandro.md</h1>
+  <p class="lede">Signed APT repository for my projects. One source, one key.</p>
+
+  <h2>Setup</h2>
+  <pre><code>curl -fsSL @@BASE_URL@@/setup.sh | sudo sh</code></pre>
+  <p>Then install whatever you came for:</p>
+  <pre><code>sudo apt install mariner3d</code></pre>
+
+  <h2>Manual setup</h2>
+  <p>If you would rather not pipe a script into a shell:</p>
+  <pre><code>sudo curl -fsSL @@BASE_URL@@/gpg.key \
+  -o /usr/share/keyrings/alejandro-md.asc
+
+sudo tee /etc/apt/sources.list.d/alejandro-md.sources &gt;/dev/null &lt;&lt;'EOF'
+Types: deb
+URIs: @@BASE_URL@@/deb
+Suites: bookworm
+Components: main
+Signed-By: /usr/share/keyrings/alejandro-md.asc
+EOF
+
+sudo apt update</code></pre>
+  <p>Replace <code>bookworm</code> with <code>trixie</code> on a trixie system.</p>
+
+  <h2>Coverage</h2>
+  <table>
+    <thead>
+      <tr><th>Releases</th><th>Architectures</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>bookworm</code>, <code>trixie</code></td>
+        <td><code>amd64</code>, <code>arm64</code>, <code>armhf</code></td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>Signing key</h2>
+  <p>Every index and package here is signed with:</p>
+  <pre class="fpr"><code>7802 971A 8339 83DD 60CD  4C1F 68A6 6E3B 0EA6 F825</code></pre>
+  <p>The armored public key is at <a href="@@BASE_URL@@/gpg.key">/gpg.key</a>.</p>
+
+  <footer>
+    Built from
+    <a href="https://github.com/amd989/packages">amd989/packages</a>.
+    Maintained by Alejandro Mora.
+  </footer>
+
+</main>
+</body>
+</html>

@@ -1,0 +1,10 @@
+#!/bin/sh
+set -e
+
+case "$1" in
+  purge|remove)
+    rm -f /etc/apt/sources.list.d/alejandro-md.sources
+    ;;
+esac
+
+exit 0
