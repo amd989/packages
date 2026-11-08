@@ -91,15 +91,46 @@ sudo apt update</code></pre>
   <h2>Coverage</h2>
   <table>
     <thead>
-      <tr><th>Releases</th><th>Architectures</th></tr>
+      <tr><th>Channel</th><th>Path</th><th>Targets</th><th>Signed</th></tr>
     </thead>
     <tbody>
       <tr>
-        <td><code>bookworm</code>, <code>trixie</code></td>
-        <td><code>amd64</code>, <code>arm64</code>, <code>armhf</code></td>
+        <td>apt</td>
+        <td><code>/deb</code></td>
+        <td><code>bookworm</code>, <code>trixie</code>; amd64, arm64, armhf, armel</td>
+        <td>yes</td>
+      </tr>
+      <tr>
+        <td>dnf / yum</td>
+        <td><code>/rpm</code></td>
+        <td><code>el9</code>; x86_64, aarch64, noarch</td>
+        <td>yes</td>
+      </tr>
+      <tr>
+        <td>FreeBSD pkg</td>
+        <td><code>/pkg</code></td>
+        <td>amd64</td>
+        <td>no</td>
+      </tr>
+      <tr>
+        <td>OpenWrt opkg</td>
+        <td><code>/openwrt/ipk</code></td>
+        <td>all</td>
+        <td>no</td>
+      </tr>
+      <tr>
+        <td>OpenWrt apk</td>
+        <td><code>/openwrt/apk</code></td>
+        <td>all</td>
+        <td>no</td>
       </tr>
     </tbody>
   </table>
+  <p>
+    FreeBSD <code>pkg</code> and OpenWrt verify with their own key formats,
+    neither of which is OpenPGP, so those two channels are served unsigned
+    rather than signed with a second key nobody has trusted.
+  </p>
 
   <h2>Signing key</h2>
   <p>Every index and package here is signed with:</p>

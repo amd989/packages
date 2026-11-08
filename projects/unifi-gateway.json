@@ -1,0 +1,16 @@
+{
+  "name": "unifi-gateway",
+  "repo": "amd989/unifi-gateway",
+  "suites": [
+    "bookworm",
+    "trixie",
+    "stable"
+  ],
+  "formats": [
+    "deb",
+    "rpm",
+    "pkg",
+    "ipk",
+    "apk"
+  ]
+}

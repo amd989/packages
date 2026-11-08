@@ -7,6 +7,9 @@ name: publish
 # here. This job is the only holder of the R2 credentials and the only writer
 # of the reprepro database, which is why it is serialized by a concurrency
 # group rather than run per project.
+#
+# Channels: deb (reprepro), rpm (createrepo_c), FreeBSD pkg, OpenWrt ipk
+# and apk. Which of them a project publishes is declared in projects/*.json.
 
 on:
   repository_dispatch:
@@ -81,7 +84,8 @@ jobs:
       - name: Install tooling
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends reprepro rclone jq
+          sudo apt-get install -y --no-install-recommends \
+            reprepro rclone jq createrepo-c rpm binutils gzip
 
       - name: Import GPG signing key
         env:
@@ -102,7 +106,16 @@ jobs:
           echo "GPG_KEY_ID=$FPR" >> "$GITHUB_ENV"
           gpg --armor --export "$FPR" > gpg.key
 
+          # rpm signs through gpg but drives it itself, so it needs the key
+          # name and a non-interactive signing command of its own.
+          cat > "$HOME/.rpmmacros" <<EOF
+          %_signature gpg
+          %_gpg_name $FPR
+          %__gpg_sign_cmd %{__gpg} gpg --batch --pinentry-mode loopback --no-armor --no-secmem-warning -u "%{_gpg_name}" -sbo %{__signature_filename} %{__plaintext_filename}
+          EOF
+
       - name: Resolve what to publish
+        id: targets
         env:
           EVENT_NAME: ${{ github.event_name }}
           PAYLOAD_REPO: ${{ github.event.client_payload.repo }}
@@ -139,14 +152,25 @@ jobs:
               exit 1
             fi
             jq -c -s --arg r "$REQ_REPO" --arg t "$REQ_TAG" \
-              '.[] | select(.repo == $r) | {repo, suites, deb_pattern, tag: $t}' \
+              '.[] | select(.repo == $r) | {name, repo, suites, formats, tag: $t}' \
               projects/*.json > targets.jsonl
           else
-            jq -c -s '.[] | {repo, suites, deb_pattern, tag: ""}' projects/*.json > targets.jsonl
+            jq -c -s '.[] | {name, repo, suites, formats, tag: ""}' \
+              projects/*.json > targets.jsonl
           fi
 
           echo "publishing:"
           cat targets.jsonl
+
+          # Per-format flags, so the FreeBSD VM and the container steps only
+          # run when something actually needs them.
+          for fmt in deb rpm pkg ipk apk; do
+            if jq -e -s --arg f "$fmt" 'any(.[]; .formats | index($f))' targets.jsonl >/dev/null; then
+              echo "has_$fmt=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "has_$fmt=false" >> "$GITHUB_OUTPUT"
+            fi
+          done
 
       - name: Restore reprepro state
         env:
@@ -170,29 +194,55 @@ jobs:
             [ -n "$target" ] || continue
             repo=$(jq -r '.repo' <<<"$target")
             tag=$(jq -r '.tag' <<<"$target")
-            pattern=$(jq -r '.deb_pattern' <<<"$target")
 
             if [ -z "$tag" ] || [ "$tag" = "null" ]; then
               tag=$(gh release view -R "$repo" --json tagName -q .tagName)
               echo "$repo: latest release is $tag"
             fi
 
-            dest="incoming/$(echo "$repo" | tr '/' '_')"
-            mkdir -p "$dest"
-            gh release download "$tag" -R "$repo" -p "$pattern" -D "$dest" --clobber
+            slug=$(echo "$repo" | tr '/' '_')
+            for fmt in $(jq -r '.formats[]' <<<"$target"); do
+              dest="incoming/$slug/$fmt"
+              mkdir -p "$dest"
+              gh release download "$tag" -R "$repo" -p "*.$fmt" -D "$dest" --clobber \
+                || echo "::warning::$repo $tag has no *.$fmt assets"
+            done
+
+            # data.pkg and packagesite.pkg are the FreeBSD repo index that the
+            # project built for its own channel, not packages. Including them
+            # would have pkg try to install the catalogue.
+            rm -f "incoming/$slug/pkg/data.pkg" \
+                  "incoming/$slug/pkg/packagesite.pkg" \
+                  "incoming/$slug/pkg/packagesite.yaml" 2>/dev/null || true
 
             echo "$repo $tag" >> downloaded.txt
-            ls -la "$dest"
+            find "incoming/$slug" -type f -printf '  %p (%s bytes)\n' | sort
           done < targets.jsonl
 
-      - name: Build the keyring package
+      - name: Build the bootstrap packages
         run: |
           set -euo pipefail
-          VERSION=$(cat keyring/VERSION)
-          ./keyring/build.sh "$VERSION" gpg.key incoming/_keyring
-          echo "KEYRING_VERSION=$VERSION" >> "$GITHUB_ENV"
 
-      - name: Include packages in the repository
+          # deb side
+          KEYRING_VERSION=$(cat keyring/VERSION)
+          ./keyring/build.sh "$KEYRING_VERSION" gpg.key staging/bootstrap-deb
+          echo "KEYRING_VERSION=$KEYRING_VERSION" >> "$GITHUB_ENV"
+
+          # rpm side: the symmetric package, since a deb cannot manage
+          # /etc/yum.repos.d and dnf has no equivalent of a keyring package.
+          mkdir -p "$HOME/rpmbuild/SOURCES" staging/bootstrap-rpm
+          cp gpg.key "$HOME/rpmbuild/SOURCES/RPM-GPG-KEY-alejandro-md"
+          sed "s|@@BASE_URL@@|${PUBLIC_BASE_URL}|g" rpm/alejandro-md.repo \
+            > "$HOME/rpmbuild/SOURCES/alejandro-md.repo"
+          sed "s|@@BASE_URL@@|${PUBLIC_BASE_URL}|g" rpm/alejandro-md-release.spec \
+            > /tmp/alejandro-md-release.spec
+
+          rpmbuild -bb /tmp/alejandro-md-release.spec
+          find "$HOME/rpmbuild/RPMS" -name '*.rpm' -exec cp {} staging/bootstrap-rpm/ \;
+          ls -la staging/bootstrap-rpm
+
+      - name: Build the deb repository
+        if: steps.targets.outputs.has_deb == 'true'
         run: |
           set -euo pipefail
           RP="reprepro -b . --confdir conf --dbdir db --outdir deb"
@@ -200,10 +250,12 @@ jobs:
           while read -r target; do
             [ -n "$target" ] || continue
             repo=$(jq -r '.repo' <<<"$target")
-            dest="incoming/$(echo "$repo" | tr '/' '_')"
+            slug=$(echo "$repo" | tr '/' '_')
+            dir="incoming/$slug/deb"
+            [ -d "$dir" ] || continue
 
             for suite in $(jq -r '.suites[]' <<<"$target"); do
-              for deb in "$dest"/*.deb; do
+              for deb in "$dir"/*.deb; do
                 [ -e "$deb" ] || continue
                 echo "including $(basename "$deb") into $suite"
                 $RP includedeb "$suite" "$deb"
@@ -217,12 +269,98 @@ jobs:
             if $RP list "$suite" alejandro-md-keyring | grep -q "${KEYRING_VERSION}"; then
               echo "keyring ${KEYRING_VERSION} already in $suite"
             else
-              $RP includedeb "$suite" incoming/_keyring/*.deb
+              $RP includedeb "$suite" staging/bootstrap-deb/*.deb
             fi
           done
 
           $RP export
           find deb -maxdepth 3 -type d | sort
+
+      - name: Build the rpm repository
+        if: steps.targets.outputs.has_rpm == 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p rpm-repo/packages
+
+          # Unlike the deb side there is no incremental database, so the rpm
+          # tree is rebuilt from what the releases currently hold. The weekly
+          # reconciliation run is what keeps every project present.
+          rclone copy "r2:${R2_PUBLIC_BUCKET}/rpm/packages" rpm-repo/packages \
+            --checksum || echo "no existing rpm packages"
+
+          find incoming -path '*/rpm/*.rpm' -exec cp {} rpm-repo/packages/ \;
+          cp staging/bootstrap-rpm/*.rpm rpm-repo/packages/
+
+          # The old per-project workflows wrote a detached .asc beside each
+          # rpm, which dnf ignores: gpgcheck reads the signature embedded in
+          # the package header. rpm --addsign puts it there.
+          rpm --addsign rpm-repo/packages/*.rpm
+
+          createrepo_c --update rpm-repo/
+          # repo_gpgcheck verifies this, not the packages.
+          rm -f rpm-repo/repodata/repomd.xml.asc
+          gpg --batch --pinentry-mode loopback --detach-sign --armor \
+            rpm-repo/repodata/repomd.xml
+
+          ls -la rpm-repo/packages | tail -5
+          ls -la rpm-repo/repodata
+
+      - name: Build the OpenWrt ipk feed
+        if: steps.targets.outputs.has_ipk == 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p openwrt/ipk
+          rclone copy "r2:${R2_PUBLIC_BUCKET}/openwrt/ipk" openwrt/ipk \
+            --checksum --include "*.ipk" || true
+          find incoming -path '*/ipk/*.ipk' -exec cp {} openwrt/ipk/ \;
+          ./tools/mkopkg-index.sh openwrt/ipk
+          ls -la openwrt/ipk
+
+      - name: Build the OpenWrt apk feed
+        if: steps.targets.outputs.has_apk == 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p openwrt/apk
+          rclone copy "r2:${R2_PUBLIC_BUCKET}/openwrt/apk" openwrt/apk \
+            --checksum --include "*.apk" || true
+          find incoming -path '*/apk/*.apk' -exec cp {} openwrt/apk/ \;
+
+          # apk indexing needs apk-tools, which Ubuntu does not package.
+          # alpine:edge carries apk-tools 3, whose "mkndx" produces the v3
+          # index OpenWrt 25.12 expects; "index" is the v2 fallback.
+          docker run --rm -v "$PWD/openwrt/apk:/feed" -w /feed alpine:edge sh -c '
+            set -e
+            if apk mkndx --help >/dev/null 2>&1; then
+              apk mkndx --output packages.adb *.apk
+            else
+              apk index --output APKINDEX.tar.gz *.apk
+            fi
+          '
+          sudo chown -R "$(id -u):$(id -g)" openwrt/apk
+          ls -la openwrt/apk
+
+      - name: Set up FreeBSD
+        if: steps.targets.outputs.has_pkg == 'true'
+        uses: vmactions/freebsd-vm@v1.2.4
+        with:
+          usesh: true
+          prepare: pkg install -y pkg
+
+      - name: Build the FreeBSD pkg repository
+        if: steps.targets.outputs.has_pkg == 'true'
+        shell: freebsd {0}
+        run: |
+          set -e
+          mkdir -p pkg-repo
+          find incoming -path '*/pkg/*.pkg' -exec cp {} pkg-repo/ \;
+          ls -l pkg-repo
+
+          # One combined catalogue across every project, which is the whole
+          # point of a central repository. The per-project indices attached to
+          # the releases cannot be merged outside FreeBSD, so it is rebuilt
+          # here from the packages themselves.
+          pkg repo pkg-repo
+          ls -l pkg-repo
 
       - name: Render site files
         run: |
@@ -235,13 +373,32 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Order matters. New pool files must exist before the indices that
-          # reference them, and pruning must happen only after the indices
-          # have stopped referencing the old ones. Otherwise a client that
-          # updates mid-publish gets a hash sum mismatch or a 404.
-          rclone copy deb/pool "r2:${R2_PUBLIC_BUCKET}/deb/pool" --checksum --transfers 8 -v
-          rclone sync deb/dists "r2:${R2_PUBLIC_BUCKET}/deb/dists" --checksum --transfers 8 -v
-          rclone sync deb/pool  "r2:${R2_PUBLIC_BUCKET}/deb/pool"  --checksum --transfers 8 -v
+          if [ -d deb/pool ]; then
+            # Order matters. New pool files must exist before the indices that
+            # reference them, and pruning must happen only after the indices
+            # have stopped referencing the old ones. Otherwise a client that
+            # updates mid-publish gets a hash sum mismatch or a 404.
+            rclone copy deb/pool  "r2:${R2_PUBLIC_BUCKET}/deb/pool"  --checksum --transfers 8 -v
+            rclone sync deb/dists "r2:${R2_PUBLIC_BUCKET}/deb/dists" --checksum --transfers 8 -v
+            rclone sync deb/pool  "r2:${R2_PUBLIC_BUCKET}/deb/pool"  --checksum --transfers 8 -v
+          fi
+
+          if [ -d rpm-repo ]; then
+            rclone copy rpm-repo/packages "r2:${R2_PUBLIC_BUCKET}/rpm/packages" --checksum --transfers 8 -v
+            rclone sync rpm-repo/repodata "r2:${R2_PUBLIC_BUCKET}/rpm/repodata" --checksum -v
+            rclone sync rpm-repo/packages "r2:${R2_PUBLIC_BUCKET}/rpm/packages" --checksum --transfers 8 -v
+          fi
+
+          if [ -d pkg-repo ]; then
+            rclone sync pkg-repo "r2:${R2_PUBLIC_BUCKET}/pkg" --checksum --transfers 8 -v
+          fi
+
+          if [ -d openwrt/ipk ]; then
+            rclone sync openwrt/ipk "r2:${R2_PUBLIC_BUCKET}/openwrt/ipk" --checksum -v
+          fi
+          if [ -d openwrt/apk ]; then
+            rclone sync openwrt/apk "r2:${R2_PUBLIC_BUCKET}/openwrt/apk" --checksum -v
+          fi
 
           rclone copy publish-site "r2:${R2_PUBLIC_BUCKET}" --checksum -v
 
@@ -249,11 +406,12 @@ jobs:
         run: rclone sync ./db "r2:${R2_STATE_BUCKET}/reprepro-db" --checksum -v
 
       - name: Summary
+        if: always()
         run: |
           {
             echo "### Published to ${PUBLIC_BASE_URL}"
             echo
-            echo "Signed with \`${GPG_KEY_ID}\`"
+            echo "Signed with \`${GPG_KEY_ID:-unknown}\`"
             echo
             if [ -f downloaded.txt ]; then
               echo "| project | tag |"
@@ -262,4 +420,12 @@ jobs:
                 echo "| \`$repo\` | \`$tag\` |"
               done < downloaded.txt
             fi
+            echo
+            echo "| channel | built |"
+            echo "| --- | --- |"
+            echo "| deb | ${{ steps.targets.outputs.has_deb }} |"
+            echo "| rpm | ${{ steps.targets.outputs.has_rpm }} |"
+            echo "| pkg | ${{ steps.targets.outputs.has_pkg }} |"
+            echo "| ipk | ${{ steps.targets.outputs.has_ipk }} |"
+            echo "| apk | ${{ steps.targets.outputs.has_apk }} |"
           } >> "$GITHUB_STEP_SUMMARY"

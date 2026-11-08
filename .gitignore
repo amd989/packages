@@ -8,3 +8,10 @@ incoming/
 *.deb
 *.rpm
 gpg.key
+
+# build output from the extra channels
+rpm-repo/
+pkg-repo/
+openwrt/
+staging/
+publish-site/

@@ -1,0 +1,13 @@
+{
+  "name": "mediasmartserverd",
+  "repo": "amd989/mediasmartserverd",
+  "suites": [
+    "bookworm",
+    "trixie",
+    "stable"
+  ],
+  "formats": [
+    "deb",
+    "rpm"
+  ]
+}

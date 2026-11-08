@@ -1,0 +1,13 @@
+{
+  "name": "infrafi",
+  "repo": "amd989/InfraFi",
+  "suites": [
+    "bookworm",
+    "trixie",
+    "stable"
+  ],
+  "formats": [
+    "deb",
+    "rpm"
+  ]
+}

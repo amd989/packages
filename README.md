@@ -3,35 +3,62 @@
 Central package repository for my projects, served at
 **https://packages.alejandro.md**.
 
-One APT repository, one signing key, one source line on the user's machine, no
+One repository, one signing key, one source line on the user's machine, no
 matter how many of my projects they install. Replaces the per-project
-`gh-pages` repositories that each shipped their own key and source file.
+`gh-pages` repositories that each shipped their own key, their own source
+file and their own setup scripts.
 
 ## How it fits together
 
 ```
           amd989/packages  (this repo)
-          holds reprepro conf + R2 credentials
+          holds the repo config + R2 credentials
           the only writer of the index
                   ^
                   | repository_dispatch { repo, tag }
                   |
-   +--------------+--------------+--------------+
-   |              |              |              |
-mariner3d/     readout      klipper-connect    ...
- mariner
+   +--------------+--------------+----------------+
+   |              |              |                |
+mariner3d/   amd989/        amd989/          amd989/
+ mariner     unifi-gateway  lcd4linux-ax206  InfraFi  ...
    each builds its own artifacts and attaches
    them to its own GitHub Release
 ```
 
-Project repositories never hold R2 credentials and never touch the index. They
-build, they publish a GitHub Release, they send one dispatch. This repository
-downloads the release assets, folds them into reprepro, and syncs the result to
-Cloudflare R2.
+Project repositories never hold R2 credentials and never touch the index.
+They build, they publish a GitHub Release, they send one dispatch. This
+repository downloads the release assets, folds them into the right channel,
+and syncs the result to Cloudflare R2.
 
-Because the artifacts are pulled from GitHub Releases rather than pushed, the
+Because artifacts are pulled from GitHub Releases rather than pushed, the
 whole repository is reproducible from scratch. R2 is a cache of a derivable
 artifact, never the only copy of a binary.
+
+## Channels
+
+| Channel | Path | Built with | Signed |
+| --- | --- | --- | --- |
+| apt | `/deb` | reprepro | yes, OpenPGP |
+| dnf / yum | `/rpm` | createrepo_c | yes, OpenPGP |
+| FreeBSD pkg | `/pkg` | `pkg repo` in a FreeBSD VM | no |
+| OpenWrt opkg | `/openwrt/ipk` | `tools/mkopkg-index.sh` | no |
+| OpenWrt apk | `/openwrt/apk` | apk-tools in a container | no |
+
+`pkg` and OpenWrt verify repositories with their own key formats, RSA
+fingerprints and usign respectively, neither of which is OpenPGP. Signing
+them would mean a second and third key that no existing install trusts, so
+they are served unsigned, which is what the per-project repositories did
+too. The setup script says so out loud rather than leaving it implicit.
+
+Two notes on what the per-project workflows got wrong and this one does not:
+
+- They wrote a detached `.asc` next to each `.rpm`. `gpgcheck` reads the
+  signature embedded in the rpm header, so those packages were effectively
+  unsigned while the repo file claimed `gpgcheck=1`. Here `rpm --addsign`
+  puts the signature where rpm looks for it, and `repomd.xml` is signed for
+  `repo_gpgcheck=1`.
+- They copied `.ipk` files into a directory with no `Packages` index, so
+  `opkg update` against that feed could not work. The index is generated now.
 
 ## Layout
 
@@ -39,20 +66,40 @@ artifact, never the only copy of a binary.
 | --- | --- |
 | `conf/distributions` | reprepro suites, architectures, signing key |
 | `projects/*.json` | the registry of projects allowed to publish here |
-| `keyring/` | the `alejandro-md-keyring` bootstrap package |
+| `keyring/` | the `alejandro-md-keyring` deb, for apt |
+| `rpm/` | the `alejandro-md-release` rpm, for dnf |
+| `tools/` | the opkg index generator |
 | `site/` | landing page and `setup.sh`, uploaded to the bucket root |
 | `.github/workflows/publish.yaml` | the publisher |
 
-Published layout in the bucket:
+Published layout:
 
 ```
 packages.alejandro.md/
-  index.html
-  setup.sh
-  gpg.key
-  deb/dists/{bookworm,trixie}/main/binary-{amd64,arm64,armhf}/
+  index.html  setup.sh  gpg.key
+  deb/dists/{bookworm,trixie,stable}/main/binary-{amd64,arm64,armhf,armel}/
   deb/pool/main/...
+  rpm/packages/  rpm/repodata/
+  pkg/
+  openwrt/ipk/  openwrt/apk/
 ```
+
+`stable` exists because every per-project channel published its deb indices
+under that codename, so every source file already on a user's machine asks
+for it. New installs get the release-specific suite.
+
+## Bootstrapping a machine
+
+```
+curl -fsSL https://packages.alejandro.md/setup.sh | sudo sh
+```
+
+One script, four package managers: it detects apt, dnf/yum, FreeBSD `pkg`,
+and OpenWrt `opkg`/`apk`. On apt and dnf it installs a small release package
+that then owns the source definition, so later changes to the repository
+arrive as a normal package upgrade rather than another curl into a shell.
+Those packages also retire the per-project sources and keyrings from the old
+channels, which is what makes the migration silent.
 
 ## Adding a project
 
@@ -62,13 +109,14 @@ packages.alejandro.md/
    {
      "name": "readout",
      "repo": "amd989/readout",
-     "suites": ["bookworm", "trixie"],
-     "deb_pattern": "*.deb"
+     "suites": ["bookworm", "trixie", "stable"],
+     "formats": ["deb", "rpm"]
    }
    ```
 
-   A dispatch is rejected unless its `repo` appears here, so this file is the
-   access control list, not just configuration.
+   `formats` selects the channels, and the publisher looks for `*.<format>`
+   assets on the release. A dispatch is rejected unless its `repo` appears
+   here, so this file is the access control list, not just configuration.
 
 2. In that project's release workflow, after the release is published:
 
@@ -83,15 +131,16 @@ packages.alejandro.md/
          -F 'client_payload[tag]=${{ github.ref_name }}'
    ```
 
-   `PACKAGES_DISPATCH_TOKEN` is a fine-grained PAT whose only grant is
-   read and write on `amd989/packages`. The default `GITHUB_TOKEN` cannot
-   dispatch across repositories.
+   `PACKAGES_DISPATCH_TOKEN` is a fine-grained PAT whose only grant is read
+   and write on `amd989/packages`. The default `GITHUB_TOKEN` cannot dispatch
+   across repositories.
 
-3. Make the package `Depends: alejandro-md-keyring` so the source and key are
-   configured once, by one package, rather than duplicated per project.
+3. Make the deb `Depends: alejandro-md-keyring` and the rpm
+   `Requires: alejandro-md-release`, so the source and key are configured
+   once by one package rather than duplicated per project.
 
-Private project repositories additionally need a token here that can read their
-releases; public ones work with the default `GITHUB_TOKEN`.
+Private project repositories additionally need a token here that can read
+their releases; public ones work with the default `GITHUB_TOKEN`.
 
 ## Secrets
 
@@ -111,9 +160,14 @@ Buckets:
 | `packages` | public, bound to `packages.alejandro.md` | the served repository |
 | `packages-state` | private | the reprepro database |
 
+The old channels committed the reprepro database into the published
+`gh-pages` branch, which made it public and is why one of those forks grew
+to 2.58 GB. Here it lives in a private bucket and never reaches git.
+
 The signing fingerprint is pinned in the workflow. If `GPG_PRIVATE_KEY` is
-missing, or imports to any other key, the job fails rather than re-signing the
-repository with something existing installs will reject.
+missing, or imports to any other key, the job fails rather than re-signing
+the repository with something existing installs will reject. The
+per-project workflows silently generated a throwaway RSA key in that case.
 
 ## Running it
 
@@ -124,15 +178,24 @@ repository with something existing installs will reject.
 | `workflow_dispatch` with `rebuild` | discard the reprepro state and rebuild from every project's releases |
 | weekly cron | reconciliation, so a dropped or failed dispatch self-heals |
 
-Publishes are serialized by a `concurrency` group. Two of them writing the same
-reprepro database would corrupt it.
+Publishes are serialized by a `concurrency` group. Two of them writing the
+same reprepro database would corrupt it.
 
-Uploads go pool first, then indices, then a pruning pass over the pool. A
-client that runs `apt update` partway through a publish sees a consistent set
-either way, which is what avoids `Hash Sum mismatch`.
+Deb uploads go pool first, then indices, then a pruning pass over the pool,
+and rpm the same way with packages before `repodata`. A client that runs
+`apt update` or `dnf makecache` partway through a publish sees a consistent
+set either way, which is what avoids `Hash Sum mismatch`.
+
+The FreeBSD and apk steps only run when a target declares those formats, so
+an ordinary deb-and-rpm publish does not pay for a VM boot or a container
+pull.
 
 ## Recovery
 
-If the state bucket is lost, run the workflow with `rebuild` checked. It starts
-from an empty database and re-derives every suite from the projects' GitHub
-Releases. The only thing not reproducible from elsewhere is the signing key.
+If the state bucket is lost, run the workflow with `rebuild` checked. It
+starts from an empty database and re-derives every suite from the projects'
+GitHub Releases. The rpm, pkg and OpenWrt channels have no database at all
+and are rebuilt from the releases on every run.
+
+The only thing not reproducible from elsewhere is the signing key. It expires
+2030-01-01.

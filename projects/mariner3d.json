@@ -6,6 +6,8 @@
     "trixie",
     "stable"
   ],
-  "deb_pattern": "*.deb",
-  "notes": "MSLA 3D printer web controller. Previously published to amd989.github.io/mariner and ppa.l9o.dev."
+  "formats": [
+    "deb",
+    "rpm"
+  ]
 }

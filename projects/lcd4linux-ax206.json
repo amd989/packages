@@ -1,0 +1,14 @@
+{
+  "name": "lcd4linux-ax206",
+  "repo": "amd989/lcd4linux-ax206",
+  "suites": [
+    "bookworm",
+    "trixie",
+    "stable"
+  ],
+  "formats": [
+    "deb",
+    "rpm",
+    "pkg"
+  ]
+}

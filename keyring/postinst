@@ -38,12 +38,23 @@ EOF
 
     # Retire the per-project source files from before the move to
     # packages.alejandro.md, so apt does not report duplicate or dead sources.
-    for legacy in mariner3d mariner; do
-      old="/etc/apt/sources.list.d/${legacy}.list"
-      if [ -f "$old" ] && grep -qE 'amd989\.github\.io|ppa\.l9o\.dev' "$old" 2>/dev/null; then
-        mv "$old" "${old}.replaced-by-alejandro-md-keyring"
-        echo "alejandro-md-keyring: retired stale source $old" >&2
-      fi
+    for legacy in mariner3d mariner lcd4linux-ax206 mediasmartserverd \
+                  mediasmartserver unifi-gateway infrafi infrafid; do
+      for ext in list sources; do
+        old="/etc/apt/sources.list.d/${legacy}.${ext}"
+        if [ -f "$old" ] && grep -qE 'amd989\.github\.io|ppa\.l9o\.dev' "$old" 2>/dev/null; then
+          mv "$old" "${old}.replaced-by-alejandro-md-keyring"
+          echo "alejandro-md-keyring: retired stale source $old" >&2
+        fi
+      done
+    done
+
+    # The old channels each installed their own keyring under a project
+    # name. They are harmless once the source is gone, but leaving them
+    # suggests a repository that no longer exists.
+    for legacy in mariner3d mariner lcd4linux-ax206 mediasmartserverd \
+                  mediasmartserver unifi-gateway infrafi infrafid; do
+      rm -f "/usr/share/keyrings/${legacy}.gpg"
     done
     ;;
 esac
