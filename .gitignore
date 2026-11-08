@@ -3,10 +3,8 @@ db/
 
 # generated publish tree, never committed
 deb/
-rpm/
 incoming/
 *.deb
-*.rpm
 gpg.key
 
 # build output from the extra channels
