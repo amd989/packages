@@ -87,6 +87,36 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             reprepro rclone jq createrepo-c rpm binutils gzip
 
+      - name: Check R2 access
+        run: |
+          set -euo pipefail
+
+          # A denied read here used to surface much later as a bland
+          # "no existing rpm packages", so the credentials are proven once,
+          # before anything is built or signed.
+          for bucket in "$R2_PUBLIC_BUCKET" "$R2_STATE_BUCKET"; do
+            if rclone lsjson "r2:$bucket" --max-depth 1 >/dev/null 2>r2.err; then
+              echo "read ok: $bucket"
+              continue
+            fi
+            echo "::error::Cannot list the R2 bucket '$bucket': $(grep -m1 . r2.err || echo 'unknown error')"
+            echo "Check that the bucket exists under exactly that name, and that"
+            echo "R2_ACCESS_KEY_ID belongs to an R2 API token holding Object Read"
+            echo "and Write on it. A token scoped to individual objects or to a"
+            echo "prefix cannot list a bucket, and this publisher has to list in"
+            echo "order to reconcile against what is already published."
+            exit 1
+          done
+
+          echo probe > r2-probe.txt
+          if ! rclone copyto r2-probe.txt "r2:${R2_PUBLIC_BUCKET}/.r2-write-probe" 2>r2.err; then
+            echo "::error::Cannot write to the R2 bucket '${R2_PUBLIC_BUCKET}': $(grep -m1 . r2.err || echo 'unknown error')"
+            exit 1
+          fi
+          rclone deletefile "r2:${R2_PUBLIC_BUCKET}/.r2-write-probe" || true
+          rm -f r2-probe.txt r2.err
+          echo "write ok: ${R2_PUBLIC_BUCKET}"
+
       - name: Import GPG signing key
         env:
           GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
@@ -342,12 +372,23 @@ jobs:
           gpg --batch --pinentry-mode loopback --detach-sign --armor \
             rpm-repo/repodata/repomd.xml
 
-          # Proof that the signature really is in the header, and which
-          # algorithm it used. dnf reads this, not a file beside the package.
+          # Proof that the signature really is in the header, where
+          # gpgcheck reads it, and not in a file beside the package. This is
+          # a gate, not a log line: the per-project workflows produced
+          # unsigned packages for years while claiming gpgcheck=1, and the
+          # only reason nobody noticed is that nothing ever checked.
+          unsigned=0
           for f in rpm-repo/packages/*.rpm; do
-            sig=$(rpm -qp --qf '%{SIGPGP:pgpsig}' "$f" 2>/dev/null || true)
-            echo "$(basename "$f"): ${sig:-UNSIGNED}"
+            sig=$(rpm -qpi "$f" 2>/dev/null | sed -n 's/^Signature *: *//p')
+            echo "$(basename "$f"): ${sig:-(none)}"
+            case "${sig:-(none)}" in
+              ""|"(none)") unsigned=$((unsigned + 1)) ;;
+            esac
           done
+          if [ "$unsigned" -gt 0 ]; then
+            echo "::error::$unsigned package(s) carry no header signature. dnf would refuse them with gpgcheck=1."
+            exit 1
+          fi
 
           ls -la rpm-repo/repodata
 
@@ -367,23 +408,68 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p openwrt/apk
-          rclone copy "r2:${R2_PUBLIC_BUCKET}/openwrt/apk" openwrt/apk \
-            --checksum --include "*.apk" || true
-          find incoming -path '*/apk/*.apk' -exec cp {} openwrt/apk/ \;
+          rclone copy "r2:${R2_PUBLIC_BUCKET}/openwrt/apk" openwrt/apk --checksum --include "*.apk" || true
+          find incoming -path '*/apk/*.apk' -exec cp {} openwrt/apk/ ';'
 
           # apk indexing needs apk-tools, which Ubuntu does not package.
-          # alpine:edge carries apk-tools 3, whose "mkndx" produces the v3
+          # alpine:edge carries apk-tools 3, whose "mkndx" writes the v3
           # index OpenWrt 25.12 expects; "index" is the v2 fallback.
+          #
+          # Each package is indexed on its own first, so a file that is not
+          # a real apk is named and skipped instead of taking the feed down.
+          # unifi-gateway currently ships one: a single gzip member holding
+          # only .PKGINFO and the install scripts, with no payload at all.
           docker run --rm -v "$PWD/openwrt/apk:/feed" -w /feed alpine:edge sh -c '
             set -e
             if apk mkndx --help >/dev/null 2>&1; then
-              apk mkndx --output packages.adb *.apk
+              MK=mkndx; OUT=packages.adb; PROBE=/tmp/probe.adb
             else
-              apk index --output APKINDEX.tar.gz *.apk
+              MK=index; OUT=APKINDEX.tar.gz; PROBE=/tmp/probe.tar.gz
             fi
-          '
+            usable=""
+            for f in *.apk; do
+              [ -e "$f" ] || continue
+              if apk $MK --output "$PROBE" "$f" >/dev/null 2>&1; then
+                usable="$usable $f"
+              else
+                echo "REJECT $f"
+              fi
+              rm -f "$PROBE"
+            done
+            if [ -n "$usable" ]; then
+              apk $MK --output "$OUT" $usable
+              echo "INDEXED $MK"
+            else
+              echo "NOINDEX"
+            fi
+          ' | tee apk-index.log
           sudo chown -R "$(id -u):$(id -g)" openwrt/apk
-          ls -la openwrt/apk
+
+          sed -n 's/^REJECT //p' apk-index.log > apk-rejected.txt || true
+          while read -r bad; do
+            [ -n "$bad" ] || continue
+            echo "::warning::$bad is not a usable apk package and was left out of the OpenWrt apk feed."
+            rm -f "openwrt/apk/$bad"
+          done < apk-rejected.txt
+
+          if grep -qx NOINDEX apk-index.log; then
+            # Nothing valid to serve. Removing the directory keeps the upload
+            # step from syncing an empty tree over a feed that may be live.
+            echo "::warning::No usable apk package, so the apk feed was left untouched."
+            rm -rf openwrt/apk
+          fi
+
+          if [ -s apk-rejected.txt ]; then
+            {
+              echo "### apk packages left out"
+              echo
+              echo "Not valid apk archives. Fix them in the project that builds them."
+              echo
+              sed 's/^/- /' apk-rejected.txt
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          ls -la openwrt/apk 2>/dev/null || true
 
       - name: Set up FreeBSD
         if: steps.targets.outputs.has_pkg == 'true'
@@ -442,7 +528,9 @@ jobs:
           if [ -d openwrt/ipk ]; then
             rclone sync openwrt/ipk "r2:${R2_PUBLIC_BUCKET}/openwrt/ipk" --checksum -v
           fi
-          if [ -d openwrt/apk ]; then
+          # Only with an index. Syncing a tree that has none would publish a
+          # feed apk cannot read, or delete a working one.
+          if [ -f openwrt/apk/packages.adb ] || [ -f openwrt/apk/APKINDEX.tar.gz ]; then
             rclone sync openwrt/apk "r2:${R2_PUBLIC_BUCKET}/openwrt/apk" --checksum -v
           fi
 
