@@ -106,12 +106,17 @@ jobs:
           echo "GPG_KEY_ID=$FPR" >> "$GITHUB_ENV"
           gpg --armor --export "$FPR" > gpg.key
 
-          # rpm signs through gpg but drives it itself, so it needs the key
-          # name and a non-interactive signing command of its own.
+          # rpm signs through gpg but drives it itself, so it needs to know
+          # which key to use. Only the key name is set here: %__gpg_sign_cmd
+          # is deliberately not overridden, because its correct form differs
+          # between rpm versions. rpm 4.19 moved signing to a shell, which
+          # makes the argv[0] duplication that older examples carry
+          # ("%{__gpg} gpg --batch ...") turn the second word into a
+          # filename, and gpg then rejects every following flag. The
+          # distribution's own macro is correct for its own rpm.
           cat > "$HOME/.rpmmacros" <<EOF
           %_signature gpg
           %_gpg_name $FPR
-          %__gpg_sign_cmd %{__gpg} gpg --batch --pinentry-mode loopback --no-armor --no-secmem-warning -u "%{_gpg_name}" -sbo %{__signature_filename} %{__plaintext_filename}
           EOF
 
       - name: Resolve what to publish
@@ -294,7 +299,42 @@ jobs:
           # The old per-project workflows wrote a detached .asc beside each
           # rpm, which dnf ignores: gpgcheck reads the signature embedded in
           # the package header. rpm --addsign puts it there.
-          rpm --addsign rpm-repo/packages/*.rpm
+          echo "signing with: $(rpm --eval '%__gpg_sign_cmd')"
+
+          # Signed one at a time. A project that ships a damaged rpm is that
+          # project's bug, and it must not stop every other project from
+          # being published, so a package rpm refuses to sign is left out of
+          # the repository and reported instead of aborting the run.
+          rejected=()
+          for f in rpm-repo/packages/*.rpm; do
+            if rpm --addsign "$f" >/dev/null 2>rpm-sign.err; then
+              continue
+            fi
+            reason=$(grep -m1 . rpm-sign.err || echo "rpm --addsign failed")
+            echo "::warning::$(basename "$f") was left out of the rpm repository: $reason"
+            rejected+=("$(basename "$f"): $reason")
+            rm -f "$f"
+          done
+          rm -f rpm-sign.err
+
+          if [ "${#rejected[@]}" -gt 0 ]; then
+            {
+              echo "### rpm packages left out"
+              echo
+              echo "These were rejected by \`rpm --addsign\`, which refuses to sign a"
+              echo "package whose header digests do not match its payload. Fix them in"
+              echo "the project that builds them."
+              echo
+              for r in "${rejected[@]}"; do
+                echo "- \`$r\`"
+              done
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          if ! compgen -G "rpm-repo/packages/*.rpm" >/dev/null; then
+            echo "::error::Every rpm was rejected, so there is nothing to index."
+            exit 1
+          fi
 
           createrepo_c --update rpm-repo/
           # repo_gpgcheck verifies this, not the packages.
@@ -302,7 +342,13 @@ jobs:
           gpg --batch --pinentry-mode loopback --detach-sign --armor \
             rpm-repo/repodata/repomd.xml
 
-          ls -la rpm-repo/packages | tail -5
+          # Proof that the signature really is in the header, and which
+          # algorithm it used. dnf reads this, not a file beside the package.
+          for f in rpm-repo/packages/*.rpm; do
+            sig=$(rpm -qp --qf '%{SIGPGP:pgpsig}' "$f" 2>/dev/null || true)
+            echo "$(basename "$f"): ${sig:-UNSIGNED}"
+          done
+
           ls -la rpm-repo/repodata
 
       - name: Build the OpenWrt ipk feed
