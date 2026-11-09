@@ -186,6 +186,12 @@ and rpm the same way with packages before `repodata`. A client that runs
 `apt update` or `dnf makecache` partway through a publish sees a consistent
 set either way, which is what avoids `Hash Sum mismatch`.
 
+Each suite carries one version of each package per architecture. reprepro's
+`Limit` field would keep more, but it needs 5.4.0 and Debian ships
+`5.4.6+really5.3.2`, having reverted that feature, so the field is not
+available to use. Older versions stay downloadable from the projects'
+GitHub Releases.
+
 The FreeBSD and apk steps only run when a target declares those formats, so
 an ordinary deb-and-rpm publish does not pay for a VM boot or a container
 pull.
