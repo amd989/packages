@@ -98,6 +98,10 @@ jobs:
           # A denied read here used to surface much later as a bland
           # "no existing rpm packages", so the credentials are proven once,
           # before anything is built or signed.
+          # Both buckets are reported before giving up, so one look at the
+          # log is enough to tell a missing bucket from a token that only
+          # covers one of them.
+          denied=0
           for bucket in "$R2_PUBLIC_BUCKET" "$R2_STATE_BUCKET"; do
             if rclone lsjson "r2:$bucket" --max-depth 1 >/dev/null 2>r2.err; then
               echo "read ok: $bucket"
@@ -105,13 +109,23 @@ jobs:
             fi
             reason=$(grep -m1 -E 'ERROR|Denied|NoSuch|Forbidden|Failed' r2.err || grep -m1 . r2.err || echo 'unknown error')
             echo "::error::Cannot list the R2 bucket '$bucket': $reason"
-            echo "Check that the bucket exists under exactly that name, and that"
-            echo "R2_ACCESS_KEY_ID belongs to an R2 API token holding Object Read"
-            echo "and Write on it. A token scoped to individual objects or to a"
-            echo "prefix cannot list a bucket, and this publisher has to list in"
-            echo "order to reconcile against what is already published."
-            exit 1
+            denied=$((denied + 1))
           done
+
+          if [ "$denied" -gt 0 ]; then
+            echo "AccessDenied means the key authenticated and is simply not"
+            echo "allowed on that bucket. A wrong account id or secret gives"
+            echo "InvalidAccessKeyId or SignatureDoesNotMatch instead, so the"
+            echo "credentials themselves are fine and the problem is one of:"
+            echo "  - the bucket does not exist under exactly that name"
+            echo "  - the R2 API token is scoped to other buckets"
+            echo "  - the token was made under My Profile rather than R2, which"
+            echo "    does not produce an S3 key pair at all"
+            echo "The token needs Object Read and Write on both buckets. One"
+            echo "scoped to individual objects or to a prefix cannot list, and"
+            echo "this publisher lists in order to reconcile what is published."
+            exit 1
+          fi
 
           echo probe > r2-probe.txt
           if ! rclone copyto r2-probe.txt "r2:${R2_PUBLIC_BUCKET}/.r2-write-probe" 2>r2.err; then
