@@ -51,6 +51,10 @@ jobs:
 
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # No config file: the remote is defined entirely by the variables
+      # below. Naming it /dev/null also stops rclone warning about its
+      # absence, which otherwise lands in every error message.
+      RCLONE_CONFIG: /dev/null
       RCLONE_CONFIG_R2_TYPE: s3
       RCLONE_CONFIG_R2_PROVIDER: Cloudflare
       RCLONE_CONFIG_R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
@@ -99,7 +103,8 @@ jobs:
               echo "read ok: $bucket"
               continue
             fi
-            echo "::error::Cannot list the R2 bucket '$bucket': $(grep -m1 . r2.err || echo 'unknown error')"
+            reason=$(grep -m1 -E 'ERROR|Denied|NoSuch|Forbidden|Failed' r2.err || grep -m1 . r2.err || echo 'unknown error')
+            echo "::error::Cannot list the R2 bucket '$bucket': $reason"
             echo "Check that the bucket exists under exactly that name, and that"
             echo "R2_ACCESS_KEY_ID belongs to an R2 API token holding Object Read"
             echo "and Write on it. A token scoped to individual objects or to a"
@@ -110,7 +115,8 @@ jobs:
 
           echo probe > r2-probe.txt
           if ! rclone copyto r2-probe.txt "r2:${R2_PUBLIC_BUCKET}/.r2-write-probe" 2>r2.err; then
-            echo "::error::Cannot write to the R2 bucket '${R2_PUBLIC_BUCKET}': $(grep -m1 . r2.err || echo 'unknown error')"
+            reason=$(grep -m1 -E 'ERROR|Denied|NoSuch|Forbidden|Failed' r2.err || grep -m1 . r2.err || echo 'unknown error')
+            echo "::error::Cannot write to the R2 bucket '${R2_PUBLIC_BUCKET}': $reason"
             exit 1
           fi
           rclone deletefile "r2:${R2_PUBLIC_BUCKET}/.r2-write-probe" || true
