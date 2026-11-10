@@ -349,6 +349,8 @@ jobs:
           # The old per-project workflows wrote a detached .asc beside each
           # rpm, which dnf ignores: gpgcheck reads the signature embedded in
           # the package header. rpm --addsign puts it there.
+          echo "rpm $(rpm --version | awk '{print $NF}'), gpg $(gpg --version | head -1 | awk '{print $NF}')"
+          gpg --list-secret-keys --with-colons | awk -F: '/^sec:/ {print "secret key algo " $4 ", length " $3}'
           echo "signing with: $(rpm --eval '%__gpg_sign_cmd')"
 
           # Signed one at a time. A project that ships a damaged rpm is that
@@ -357,15 +359,17 @@ jobs:
           # the repository and reported instead of aborting the run.
           rejected=()
           for f in rpm-repo/packages/*.rpm; do
-            if rpm --addsign "$f" >/dev/null 2>rpm-sign.err; then
+            if rpm --addsign "$f" >rpm-sign.out 2>rpm-sign.err; then
+              cat rpm-sign.out rpm-sign.err
               continue
             fi
+            cat rpm-sign.out
             reason=$(grep -m1 . rpm-sign.err || echo "rpm --addsign failed")
             echo "::warning::$(basename "$f") was left out of the rpm repository: $reason"
             rejected+=("$(basename "$f"): $reason")
             rm -f "$f"
           done
-          rm -f rpm-sign.err
+          rm -f rpm-sign.err rpm-sign.out
 
           if [ "${#rejected[@]}" -gt 0 ]; then
             {
@@ -397,6 +401,13 @@ jobs:
           # a gate, not a log line: the per-project workflows produced
           # unsigned packages for years while claiming gpgcheck=1, and the
           # only reason nobody noticed is that nothing ever checked.
+          # Which tag the signature landed in, for the first package, so a
+          # (none) below can be told apart from a tag this rpm does not use.
+          probe=$(ls rpm-repo/packages/*.rpm | head -1)
+          for tag in RSAHEADER DSAHEADER SIGGPG SIGPGP; do
+            echo "$tag = $(rpm -qp --qf "%{${tag}:pgpsig}" "$probe" 2>/dev/null || echo '?')"
+          done
+
           unsigned=0
           for f in rpm-repo/packages/*.rpm; do
             sig=$(rpm -qpi "$f" 2>/dev/null | sed -n 's/^Signature *: *//p')
