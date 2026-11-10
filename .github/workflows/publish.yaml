@@ -576,6 +576,28 @@ jobs:
 
           ls -la openwrt/apk 2>/dev/null || true
 
+      # Same reason as the deb pool restore. The pkg tree used to be built
+      # from this run's downloads alone, so publishing one project replaced
+      # the live tree with just that project's packages and dropped every
+      # other project's. rpm, ipk and apk already restore first; this brings
+      # pkg in line. It runs on the host because rclone and the R2
+      # credentials live here, and before the VM starts so the restored files
+      # are in the workspace the VM copies in.
+      - name: Restore the FreeBSD pkg repository
+        if: steps.targets.outputs.has_pkg == 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p pkg-repo
+          # Packages only. data.pkg and packagesite.pkg are the catalogue,
+          # which "pkg repo" regenerates, and restoring them would have them
+          # indexed as packages.
+          rclone copy "r2:${R2_PUBLIC_BUCKET}/pkg" pkg-repo --checksum \
+            --filter "- data.pkg" --filter "- packagesite.pkg" \
+            --filter "+ *.pkg" --filter "- *" \
+            || echo "no existing pkg packages"
+          echo "restored $(find pkg-repo -maxdepth 1 -name '*.pkg' | wc -l) FreeBSD package(s):"
+          ls -l pkg-repo
+
       - name: Set up FreeBSD
         if: steps.targets.outputs.has_pkg == 'true'
         # v1.2.4 installed qemu-kvm by name, which on Ubuntu 26.04 is a
