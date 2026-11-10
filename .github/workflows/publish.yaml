@@ -285,15 +285,24 @@ jobs:
 
           # rpm side: the symmetric package, since a deb cannot manage
           # /etc/yum.repos.d and dnf has no equivalent of a keyring package.
-          mkdir -p "$HOME/rpmbuild/SOURCES" staging/bootstrap-rpm
-          cp gpg.key "$HOME/rpmbuild/SOURCES/RPM-GPG-KEY-alejandro-md"
-          sed "s|@@BASE_URL@@|${PUBLIC_BASE_URL}|g" rpm/alejandro-md.repo \
-            > "$HOME/rpmbuild/SOURCES/alejandro-md.repo"
-          sed "s|@@BASE_URL@@|${PUBLIC_BASE_URL}|g" rpm/alejandro-md-release.spec \
-            > /tmp/alejandro-md-release.spec
+          #
+          # Built with el9's own rpmbuild rather than the runner's. The
+          # runner carries rpm 6, and a package it builds ends up with its
+          # signature only where rpm 6 looks for it, so el9 sees the one
+          # package whose entire job is to configure el9 as unsigned. Every
+          # project rpm here is el9-built; this matches them.
+          mkdir -p staging/bootstrap-rpm rpmbuild/SOURCES rpmbuild/SPECS
+          cp gpg.key rpmbuild/SOURCES/RPM-GPG-KEY-alejandro-md
+          sed "s|@@BASE_URL@@|${PUBLIC_BASE_URL}|g" rpm/alejandro-md.repo > rpmbuild/SOURCES/alejandro-md.repo
+          sed "s|@@BASE_URL@@|${PUBLIC_BASE_URL}|g" rpm/alejandro-md-release.spec > rpmbuild/SPECS/alejandro-md-release.spec
 
-          rpmbuild -bb /tmp/alejandro-md-release.spec
-          find "$HOME/rpmbuild/RPMS" -name '*.rpm' -exec cp {} staging/bootstrap-rpm/ \;
+          docker run --rm -v "$PWD:/w" -w /w quay.io/centos/centos:stream9 bash -c '
+            set -e
+            dnf -q -y install rpm-build
+            rpmbuild --define "_topdir /w/rpmbuild" -bb /w/rpmbuild/SPECS/alejandro-md-release.spec
+          '
+          sudo chown -R "$(id -u):$(id -g)" rpmbuild
+          find rpmbuild/RPMS -name '*.rpm' -exec cp {} staging/bootstrap-rpm/ ';'
           ls -la staging/bootstrap-rpm
 
       - name: Build the deb repository

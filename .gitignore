@@ -13,3 +13,8 @@ pkg-repo/
 openwrt/
 staging/
 publish-site/
+rpmbuild/
+check*.txt
+check*.log
+apk-index.log
+apk-rejected.txt
