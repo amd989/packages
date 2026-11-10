@@ -518,7 +518,10 @@ jobs:
 
       - name: Set up FreeBSD
         if: steps.targets.outputs.has_pkg == 'true'
-        uses: vmactions/freebsd-vm@v1.2.4
+        # v1.2.4 installed qemu-kvm by name, which on Ubuntu 26.04 is a
+        # virtual package with several providers and so has no installation
+        # candidate. The action never reached the point of booting a VM.
+        uses: vmactions/freebsd-vm@v1.5.9
         with:
           usesh: true
           prepare: pkg install -y pkg
