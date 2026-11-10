@@ -396,32 +396,37 @@ jobs:
           gpg --batch --pinentry-mode loopback --detach-sign --armor \
             rpm-repo/repodata/repomd.xml
 
-          # Proof that the signature really is in the header, where
-          # gpgcheck reads it, and not in a file beside the package. This is
-          # a gate, not a log line: the per-project workflows produced
-          # unsigned packages for years while claiming gpgcheck=1, and the
-          # only reason nobody noticed is that nothing ever checked.
-          # Which tag the signature landed in, for the first package, so a
-          # (none) below can be told apart from a tag this rpm does not use.
-          probe=$(ls rpm-repo/packages/*.rpm | head -1)
-          for tag in RSAHEADER DSAHEADER SIGGPG SIGPGP; do
-            echo "$tag = $(rpm -qp --qf "%{${tag}:pgpsig}" "$probe" 2>/dev/null || echo '?')"
-          done
+          ls -la rpm-repo/repodata
 
-          unsigned=0
-          for f in rpm-repo/packages/*.rpm; do
-            sig=$(rpm -qpi "$f" 2>/dev/null | sed -n 's/^Signature *: *//p')
-            echo "$(basename "$f"): ${sig:-(none)}"
-            case "${sig:-(none)}" in
-              ""|"(none)") unsigned=$((unsigned + 1)) ;;
-            esac
-          done
-          if [ "$unsigned" -gt 0 ]; then
-            echo "::error::$unsigned package(s) carry no header signature. dnf would refuse them with gpgcheck=1."
+      - name: Verify rpm signatures the way dnf will
+        if: steps.targets.outputs.has_rpm == 'true'
+        run: |
+          set -euo pipefail
+
+          # Signing happens on Ubuntu, which now carries rpm 6, and rpm 6
+          # keeps signatures in RPMSIGTAG_OPENPGP rather than the RSAHEADER
+          # and DSAHEADER tags every older rpm reads. These packages target
+          # el9, whose rpm is 4.16, so checking the signature with the rpm
+          # that wrote it proves nothing. This runs the check a user's dnf
+          # would run, with their rpm, against the key they would import.
+          docker run --rm -v "$PWD:/w" -w /w quay.io/centos/centos:stream9 bash -c '
+            set -e
+            echo "verifying with $(rpm --version)"
+            rpm --import gpg.key
+            rpm --checksig rpm-repo/packages/*.rpm > checksig.txt 2>&1 || true
+            cat checksig.txt
+            if grep -v "signatures OK" checksig.txt | grep -q .; then
+              echo "FAILED"
+            else
+              echo "ALL VERIFIED"
+            fi
+          ' | tee checksig.log
+          sudo rm -f checksig.txt
+
+          if ! grep -qx "ALL VERIFIED" checksig.log; then
+            echo "::error::el9 cannot verify these signatures, so dnf would refuse the packages with gpgcheck=1."
             exit 1
           fi
-
-          ls -la rpm-repo/repodata
 
       - name: Build the OpenWrt ipk feed
         if: steps.targets.outputs.has_ipk == 'true'
