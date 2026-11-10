@@ -231,14 +231,38 @@ jobs:
         env:
           REBUILD: ${{ inputs.rebuild }}
         run: |
-          mkdir -p db
+          set -euo pipefail
+          mkdir -p db deb/pool
+
           if [ "$REBUILD" = "true" ]; then
-            echo "rebuild requested: starting from an empty database"
+            echo "rebuild requested: starting from an empty database and pool"
           else
             rclone copy "r2:${R2_STATE_BUCKET}/reprepro-db" ./db --checksum \
               || echo "no prior state found, starting fresh"
+
+            # The pool has to come back as well, not just the database.
+            # reprepro writes only the packages included on this run, but it
+            # exports indices for everything the database knows about. So
+            # publishing one project with an empty local pool makes the
+            # closing "rclone sync deb/pool" delete every other project's
+            # files while the indices still advertise them, keyring included.
+            rclone copy "r2:${R2_PUBLIC_BUCKET}/deb/pool" ./deb/pool --checksum --transfers 8 \
+              || echo "no prior pool found, starting fresh"
           fi
+
+          # An empty database next to a published repository means the state
+          # read failed, not that this is a first run. Continuing would export
+          # indices holding only the projects published on this run and prune
+          # the rest, so stop instead of silently shrinking the repository.
+          if [ "$REBUILD" != "true" ] && [ -z "$(ls -A db 2>/dev/null)" ] \
+             && rclone lsf "r2:${R2_PUBLIC_BUCKET}/deb/dists/" 2>/dev/null | grep -q .; then
+            echo "::error::reprepro state is empty but deb/dists already exists in ${R2_PUBLIC_BUCKET}. Refusing to republish, which would drop every other project from the indices. Re-run with rebuild=true if this is intentional."
+            exit 1
+          fi
+
+          echo "restored database:"
           ls -la db || true
+          echo "restored pool: $(find deb/pool -type f -name '*.deb' 2>/dev/null | wc -l) deb(s)"
 
       - name: Download release artifacts
         run: |
@@ -318,10 +342,46 @@ jobs:
             dir="incoming/$slug/deb"
             [ -d "$dir" ] || continue
 
-            for suite in $(jq -r '.suites[]' <<<"$target"); do
-              for deb in "$dir"/*.deb; do
-                [ -e "$deb" ] || continue
-                echo "including $(basename "$deb") into $suite"
+            # Projects that build per Debian release carry the codename in the
+            # Debian revision, e.g. 0.7.6-1+bookworm and 0.7.6-1+trixie. Those
+            # belong only in their own suite: dropping both into every suite
+            # lets dpkg version ordering decide, and "1+trixie" outranks
+            # "1+bookworm", so bookworm would serve a package built against
+            # trixie's interpreter. A version with no +codename suffix is
+            # release-independent and goes into every suite the project lists.
+            all_suites=$(jq -r '.suites[]' <<<"$target")
+
+            for deb in "$dir"/*.deb; do
+              [ -e "$deb" ] || continue
+              version=$(dpkg-deb -f "$deb" Version)
+
+              # Everything after the last "+", when there is one. Only treated
+              # as a codename if it names a suite we serve, so ordinary Debian
+              # suffixes like +dfsg, +ds1 or +git20260101 fall through to the
+              # release-independent path instead of being misrouted.
+              suffix=""
+              case "$version" in *+*) suffix="${version##*+}" ;; esac
+
+              targets_for_deb=""
+              for suite in $all_suites; do
+                # "stable" is the compatibility suite for sources written
+                # before the move, and conf/distributions describes it as
+                # carrying the same packages as bookworm, so it tracks the
+                # bookworm build rather than expecting a +stable one.
+                case "$suite" in
+                  stable) want="bookworm" ;;
+                  *)      want="$suite" ;;
+                esac
+                if [ -n "$suffix" ] && [ "$suffix" = "$want" ]; then
+                  targets_for_deb="$targets_for_deb $suite"
+                fi
+              done
+
+              # No suite claimed it, so the build is release-independent.
+              [ -n "$targets_for_deb" ] || targets_for_deb="$all_suites"
+
+              for suite in $targets_for_deb; do
+                echo "including $(basename "$deb") ($version) into $suite"
                 $RP includedeb "$suite" "$deb"
               done
             done
