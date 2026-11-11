@@ -1,0 +1,13 @@
+{
+  "name": "klipper-connect",
+  "repo": "amd989/klipper-connect",
+  "suites": [
+    "bookworm",
+    "trixie",
+    "stable"
+  ],
+  "formats": [
+    "deb",
+    "rpm"
+  ]
+}
