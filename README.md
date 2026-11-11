@@ -135,9 +135,13 @@ channels, which is what makes the migration silent.
    and write on `amd989/packages`. The default `GITHUB_TOKEN` cannot dispatch
    across repositories.
 
-3. Make the deb `Depends: alejandro-md-keyring` and the rpm
-   `Requires: alejandro-md-release`, so the source and key are configured
-   once by one package rather than duplicated per project.
+3. Make the deb `Recommends: alejandro-md-keyring` and the rpm
+   `Recommends: alejandro-md-release`, so the source and key are configured
+   once by one package rather than duplicated per project. Recommends
+   rather than Depends: an upgrade from an old per-project channel pulls
+   the package in either way, but a hard dependency would stop someone
+   from installing a downloaded `.deb` or `.rpm` on a machine without this
+   repository configured.
 
 Private project repositories additionally need a token here that can read
 their releases; public ones work with the default `GITHUB_TOKEN`.
