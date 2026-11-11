@@ -25,13 +25,28 @@ case "$1" in
         ;;
     esac
 
+    # Every architecture this machine installs packages for, native or foreign,
+    # that the repository also builds. Listing only the native one would cut
+    # off multiarch installs: a 64-bit Pi running the armhf build (the old
+    # setup script's --prefer-armhf) would never see the armhf index again.
+    # Foreign architectures the repository does not build, such as i386,
+    # are left out so apt does not report skipping them on every update.
+    ARCHES=""
+    for a in $(dpkg --print-architecture) $(dpkg --print-foreign-architectures); do
+      case "$a" in
+        amd64|arm64|armhf|armel) ARCHES="$ARCHES $a" ;;
+      esac
+    done
+    ARCHES="${ARCHES# }"
+    [ -n "$ARCHES" ] || ARCHES="$(dpkg --print-architecture)"
+
     cat > "$SOURCES" <<EOF
 # Managed by alejandro-md-keyring. Local edits are overwritten on upgrade.
 Types: deb
 URIs: https://packages.alejandro.md/deb
 Suites: $SUITE
 Components: main
-Architectures: $(dpkg --print-architecture)
+Architectures: $ARCHES
 Signed-By: $KEYRING
 EOF
     chmod 0644 "$SOURCES"
