@@ -1,0 +1,13 @@
+{
+  "name": "opnsense-widgets",
+  "repo": "amd989/widgets-for-opnsense",
+  "suites": [
+    "bookworm",
+    "trixie",
+    "stable"
+  ],
+  "formats": [
+    "deb",
+    "rpm"
+  ]
+}
