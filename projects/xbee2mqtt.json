@@ -1,0 +1,13 @@
+{
+  "name": "xbee2mqtt",
+  "repo": "amd989/xbee2mqtt",
+  "suites": [
+    "bookworm",
+    "trixie",
+    "stable"
+  ],
+  "formats": [
+    "deb",
+    "rpm"
+  ]
+}
