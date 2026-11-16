@@ -1,0 +1,11 @@
+{
+  "name": "readout",
+  "repo": "amd989/readout",
+  "suites": [
+    "trixie"
+  ],
+  "formats": [
+    "deb",
+    "rpm"
+  ]
+}

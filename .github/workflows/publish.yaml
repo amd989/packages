@@ -275,7 +275,13 @@ jobs:
             tag=$(jq -r '.tag' <<<"$target")
 
             if [ -z "$tag" ] || [ "$tag" = "null" ]; then
-              tag=$(gh release view -R "$repo" --json tagName -q .tagName)
+              # A project registered before its first release has nothing to
+              # publish yet. Skip it rather than fail every other project's
+              # weekly reconciliation.
+              if ! tag=$(gh release view -R "$repo" --json tagName -q .tagName) || [ -z "$tag" ]; then
+                echo "::warning::$repo has no release yet; nothing to publish for it."
+                continue
+              fi
               echo "$repo: latest release is $tag"
             fi
 
